@@ -64,8 +64,6 @@ class Mario:
         self.device = torch.device(device)
         print(f"Device: {self.device}")
 
-        # self.device = "cuda" if torch.cuda.is_available() else "cpu"
-
         # Build the Q-network
         self.net = MarioNet(self.state_dim, self.action_dim).float().to(self.device)
 

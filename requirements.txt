@@ -4,4 +4,4 @@ torchrl==0.6.0
 torch
 torchvision
 matplotlib
-nes_py
+nes_py>=8.3

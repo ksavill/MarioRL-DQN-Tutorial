@@ -59,15 +59,15 @@ for e in range(episodes):
         action = mario.act(state)
         # Step through the environment; env.step returns (next_state, reward, done, truncated, info)
         next_state, reward, done, trunc, info = env.step(action)
-        # Store experience
-        mario.cache(state, next_state, action, reward, done)
+        # Store experience; mark terminal if done or truncated
+        mario.cache(state, next_state, action, reward, done or trunc)
         # Learn from experience
         q, loss = mario.learn()
         # Log metrics
         logger.log_step(reward, loss, q)
         state = next_state
         # End episode if game over or Mario reached the flag
-        if done or info.get("flag_get", False):
+        if done or trunc or info.get("flag_get", False):
             break
 
     logger.log_episode()

@@ -3,7 +3,6 @@ import torch.nn as nn
 import numpy as np
 from tensordict import TensorDict
 from torchrl.data import TensorDictReplayBuffer, LazyMemmapStorage
-from torchvision import transforms as T
 
 
 class MarioNet(nn.Module):

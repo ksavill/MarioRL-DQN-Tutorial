@@ -1,7 +1,9 @@
 gym-super-mario-bros==7.4.0
-tensordict==0.6.1
-torchrl==0.6.0
+gymnasium>=0.29,<1.0
+tensordict>=0.8.1,<0.10
+torchrl>=0.8.1,<0.10
 torch
 torchvision
+numpy>=1.23,<2.0
 matplotlib
-nes_py>=8.3
+nes_py

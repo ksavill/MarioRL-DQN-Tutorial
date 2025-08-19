@@ -1,0 +1,82 @@
+# --- Python bytecode / cache ---
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# --- C extensions ---
+*.so
+*.pyd
+
+# --- Distribution / packaging ---
+.Python
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+sdist/
+wheels/
+share/python-wheels/
+*.egg-info/
+*.egg
+MANIFEST
+
+# --- PyInstaller ---
+*.manifest
+*.spec
+
+# --- Installer logs ---
+pip-log.txt
+pip-delete-this-directory.txt
+pip-wheel-metadata/
+
+# --- Unit test / coverage ---
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+.hypothesis/
+.pytype/
+.mypy_cache/
+.ruff_cache/
+
+# --- Jupyter ---
+.ipynb_checkpoints
+
+# --- Environments ---
+.env
+.env.*
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+.python-version
+
+# --- IDE / Editor ---
+.idea/
+.vscode/
+*.code-workspace
+.history/
+
+# --- OS files ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Logs ---
+*.log
+
+# --- Project outputs (from this repo's training scripts) ---
+checkpoints/
+*.chkpt
+*.pt
+*.pth
+*.onnx
+
+

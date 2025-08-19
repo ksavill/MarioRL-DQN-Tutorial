@@ -2,6 +2,7 @@ import numpy as np
 import time
 import datetime
 import matplotlib.pyplot as plt
+import torch
 
 
 class MetricLogger:
@@ -90,6 +91,14 @@ class MetricLogger:
             f"Time Delta {time_since_last_record} - "
             f"Time {datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}"
         )
+
+        # Optional GPU usage summary (printed to console only)
+        if torch.cuda.is_available():
+            allocated_mb = torch.cuda.memory_allocated() / (1024 ** 2)
+            reserved_mb = torch.cuda.memory_reserved() / (1024 ** 2)
+            print(
+                f"GPU Memory - Allocated: {allocated_mb:.1f} MB, Reserved: {reserved_mb:.1f} MB"
+            )
 
         with open(self.save_log, "a") as f:
             f.write(

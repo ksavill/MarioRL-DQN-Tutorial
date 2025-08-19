@@ -1,8 +1,10 @@
-import torch
 import torch.nn as nn
 import numpy as np
 from tensordict import TensorDict
 from torchrl.data import TensorDictReplayBuffer, LazyMemmapStorage
+from torchvision import transforms as T
+import torch
+from torch import amp
 
 
 class MarioNet(nn.Module):
@@ -63,8 +65,21 @@ class Mario:
         self.device = torch.device(device)
         print(f"Device: {self.device}")
 
+        # self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
         # Build the Q-network
         self.net = MarioNet(self.state_dim, self.action_dim).float().to(self.device)
+
+        # Enable cudnn autotuner for convs on GPU
+        try:
+            if torch.backends.cudnn.is_available():
+                torch.backends.cudnn.benchmark = True
+        except Exception:
+            pass
+
+        # Mixed precision for faster training on GPU
+        self.use_amp = (device == "cuda")
+        self.scaler = amp.GradScaler('cuda', enabled=self.use_amp)
 
         # Exploration parameters
         self.exploration_rate = 1
@@ -73,11 +88,11 @@ class Mario:
         self.curr_step = 0
         self.save_every = 5e5  # Save checkpoint every so many experiences
 
-        # Replay buffer parameters
+        # Replay buffer parameters - use CPU memmap storage; move to GPU on sample
         self.memory = TensorDictReplayBuffer(
-            storage=LazyMemmapStorage(10000, device=torch.device("cpu"))
+            storage=LazyMemmapStorage(10000)
         )
-        self.batch_size = 32
+        self.batch_size = 128
 
         # Discount factor for TD target
         self.gamma = 0.9
@@ -87,9 +102,14 @@ class Mario:
         self.loss_fn = torch.nn.SmoothL1Loss()
 
         # Learning schedule parameters
-        self.burnin = 1e4  # Minimum experiences before training
-        self.learn_every = 3  # Learn every n experiences
+        self.burnin = 2000  # Minimum experiences before training
+        self.learn_every = 1  # Learn every n experiences
         self.sync_every = 1e4  # Sync target network every n experiences
+        self.updates_per_step = 4  # Number of gradient updates per env step
+        
+        # GPU optimization settings
+        self.prefetch_factor = 2 if self.device.type == 'cuda' else 1
+        self.persistent_workers = self.device.type == 'cuda'
 
         if checkpoint is not None:
             self.load(checkpoint)
@@ -99,19 +119,26 @@ class Mario:
         Given a state, choose an epsilon-greedy action.
         If state is a tuple (e.g. from a reset in Gym 0.26+), take the first element.
         """
+        # unwrap tuple from gym>=0.26 reset() and ensure channel-first (C,H,W)
         if isinstance(state, tuple):
-            state = state[0].__array__()
-        else:
-            state = state.__array__()
+            state = state[0]
+        state = state.__array__()
+        # FrameStack returns (H,W,C) where C=4; convert to (C,H,W)
+        if state.ndim == 3 and state.shape[2] == 4:
+            state = np.transpose(state, (2, 0, 1)).copy()
 
         # EXPLORE: choose a random action with probability exploration_rate
         if np.random.rand() < self.exploration_rate:
             action_idx = np.random.randint(self.action_dim)
         # EXPLOIT: choose the best action according to the Q-network
         else:
-            state_tensor = torch.tensor(state, device=self.device).unsqueeze(0).float()
-            action_values = self.net(state_tensor, model="online")
-            action_idx = torch.argmax(action_values, axis=1).item()
+            # Ensure contiguous memory to avoid negative/irregular strides
+            state = np.ascontiguousarray(state)
+            # Use pinned memory for faster CPU-GPU transfer
+            state_tensor = torch.from_numpy(state).pin_memory().to(self.device, non_blocking=True).unsqueeze(0).float()
+            with torch.no_grad():  # No gradients needed for inference
+                action_values = self.net(state_tensor, model="online")
+                action_idx = torch.argmax(action_values, dim=1).item()
 
         # Decay exploration rate
         self.exploration_rate *= self.exploration_rate_decay
@@ -127,14 +154,22 @@ class Mario:
         def first_if_tuple(x):
             return x[0] if isinstance(x, tuple) else x
 
-        state = first_if_tuple(state).__array__()
-        next_state = first_if_tuple(next_state).__array__()
+        state = first_if_tuple(state)
+        next_state = first_if_tuple(next_state)
+        state = state.__array__()
+        next_state = next_state.__array__()
+        # Ensure channel-first for storage
+        if state.ndim == 3 and state.shape[2] == 4:
+            state = np.transpose(state, (2, 0, 1)).copy()
+        if next_state.ndim == 3 and next_state.shape[2] == 4:
+            next_state = np.transpose(next_state, (2, 0, 1)).copy()
 
-        state = torch.tensor(state)
-        next_state = torch.tensor(next_state)
-        action = torch.tensor([action])
-        reward = torch.tensor([reward])
-        done = torch.tensor([done])
+        # Store CPU tensors in replay buffer; transfer to GPU at sampling time
+        state = torch.from_numpy(np.ascontiguousarray(state)).float()
+        next_state = torch.from_numpy(np.ascontiguousarray(next_state)).float()
+        action = torch.tensor([action], dtype=torch.long)
+        reward = torch.tensor([reward], dtype=torch.float)
+        done = torch.tensor([done], dtype=torch.bool)
 
         self.memory.add(
             TensorDict(
@@ -146,6 +181,7 @@ class Mario:
                     "done": done,
                 },
                 batch_size=[],
+                device=torch.device('cpu'),
             )
         )
 
@@ -153,7 +189,10 @@ class Mario:
         """
         Retrieve a batch of experiences from memory.
         """
-        batch = self.memory.sample(self.batch_size).to(self.device)
+        # Sample from CPU storage and move batch to target device
+        batch = self.memory.sample(self.batch_size)
+        if self.device.type == 'cuda':
+            batch = batch.to(self.device, non_blocking=True)
         state, next_state, action, reward, done = (
             batch.get(key) for key in ("state", "next_state", "action", "reward", "done")
         )
@@ -163,7 +202,8 @@ class Mario:
         """
         Compute the TD estimate: Q_online(state, action)
         """
-        current_Q = self.net(state, model="online")[np.arange(0, self.batch_size), action]
+        batch_index = torch.arange(0, self.batch_size, device=self.device)
+        current_Q = self.net(state, model="online")[batch_index, action]
         return current_Q
 
     @torch.no_grad()
@@ -174,18 +214,32 @@ class Mario:
         """
         next_state_Q = self.net(next_state, model="online")
         best_action = torch.argmax(next_state_Q, axis=1)
-        next_Q = self.net(next_state, model="target")[np.arange(0, self.batch_size), best_action]
+        batch_index = torch.arange(0, self.batch_size, device=self.device)
+        next_Q = self.net(next_state, model="target")[batch_index, best_action]
         return (reward + (1 - done.float()) * self.gamma * next_Q).float()
 
     def update_Q_online(self, td_estimate, td_target):
         """
         Update the online Q-network by backpropagating the loss.
         """
-        loss = self.loss_fn(td_estimate, td_target)
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-        return loss.item()
+        self.optimizer.zero_grad(set_to_none=True)
+        if self.use_amp:
+            with amp.autocast('cuda'):
+                loss = self.loss_fn(td_estimate, td_target)
+            self.scaler.scale(loss).backward()
+            # Gradient clipping for stability
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            return loss.item()
+        else:
+            loss = self.loss_fn(td_estimate, td_target)
+            loss.backward()
+            # Gradient clipping for stability
+            torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
+            self.optimizer.step()
+            return loss.item()
 
     def sync_Q_target(self):
         """
@@ -228,12 +282,17 @@ class Mario:
         if self.curr_step % self.learn_every != 0:
             return None, None
 
-        state, next_state, action, reward, done = self.recall()
-
-        # Compute TD estimate and target
-        td_est = self.td_estimate(state, action)
-        td_tgt = self.td_target(reward, next_state, done)
-
-        # Update Q-network and return the mean Q-value and loss for logging
-        loss = self.update_Q_online(td_est, td_tgt)
-        return td_est.mean().item(), loss
+        mean_q = 0.0
+        mean_loss = 0.0
+        for _ in range(int(self.updates_per_step)):
+            state, next_state, action, reward, done = self.recall()
+            # Compute TD estimate and target
+            td_est = self.td_estimate(state, action)
+            td_tgt = self.td_target(reward, next_state, done)
+            # Update Q-network
+            loss = self.update_Q_online(td_est, td_tgt)
+            mean_q += td_est.mean().item()
+            mean_loss += loss
+        mean_q /= float(self.updates_per_step)
+        mean_loss /= float(self.updates_per_step)
+        return mean_q, mean_loss

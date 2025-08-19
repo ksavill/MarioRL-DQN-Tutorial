@@ -2,6 +2,7 @@ import datetime
 from pathlib import Path
 
 import gym
+import warnings
 import gym_super_mario_bros
 from gym.wrappers import FrameStack
 from nes_py.wrappers import JoypadSpace
@@ -9,6 +10,10 @@ from nes_py.wrappers import JoypadSpace
 from wrappers import SkipFrame, GrayScaleObservation, ResizeObservation
 from metrics import MetricLogger
 from agent import Mario
+from config_utils import load_config
+
+# Silence benign DeprecationWarnings emitted by Gym with NumPy>=1.24
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="gym.*")
 
 # Initialize Super Mario environment with API compatibility for Gym 0.26+
 if gym.__version__ < "0.26":
@@ -16,7 +21,6 @@ if gym.__version__ < "0.26":
 else:
     env = gym_super_mario_bros.make(
         "SuperMarioBros-1-1-v3",
-        render_mode="rgb",
         apply_api_compatibility=True,
     )
 
@@ -35,6 +39,7 @@ if gym.__version__ < "0.26":
 else:
     env = FrameStack(env, num_stack=4)
 
+
 # Create a unique directory for saving checkpoints and logs
 save_dir = Path("checkpoints") / datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
 save_dir.mkdir(parents=True, exist_ok=True)
@@ -43,7 +48,10 @@ checkpoint = None  # Set this to a checkpoint path if you wish to load one
 mario = Mario(state_dim=(4, 84, 84), action_dim=env.action_space.n, save_dir=save_dir, checkpoint=checkpoint)
 logger = MetricLogger(save_dir)
 
-episodes = 40000  # For demonstration. Increase (e.g., to 40000) for real training.
+# Load episodes and logging interval from config
+_cfg = load_config()
+episodes = int(_cfg.get("train", {}).get("episodes", 40000))
+_log_every = int(_cfg.get("train", {}).get("log_every_episodes", 20))
 """
 An episode is a complete run through the environment from a reset until a terminal condition is met.
 - for example, when Mario dies or reaches the flag).
@@ -52,6 +60,12 @@ Note: in agent.py, there is a save_every parameter that determines how often to 
 It is currently set to 5e5 (500,000 steps). If the number of episodes is too low, the model may not be saved due to not reaching enough steps.
 """
 
+print(f"Starting training for {episodes} total episodes")
+with open(logger.save_log, "a") as f:
+    f.write(
+        f"# Starting training for {episodes} episodes at {datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}\n"
+    )
+
 for e in range(episodes):
     state = env.reset()  # In Gym 0.26, reset() returns (obs, info); see agent.act below
     while True:
@@ -59,19 +73,23 @@ for e in range(episodes):
         action = mario.act(state)
         # Step through the environment; env.step returns (next_state, reward, done, truncated, info)
         next_state, reward, done, trunc, info = env.step(action)
-        # Store experience; mark terminal if done or truncated
-        mario.cache(state, next_state, action, reward, done or trunc)
+        # Store experience
+        done_or_trunc = done or trunc
+        mario.cache(state, next_state, action, reward, done_or_trunc)
         # Learn from experience
         q, loss = mario.learn()
         # Log metrics
         logger.log_step(reward, loss, q)
         state = next_state
         # End episode if game over or Mario reached the flag
-        if done or trunc or info.get("flag_get", False):
+        if done_or_trunc or info.get("flag_get", False):
             break
 
     logger.log_episode()
 
     # Record progress every 20 episodes (or on the last episode)
-    if (e % 20 == 0) or (e == episodes - 1):
+    if (e % _log_every == 0) or (e == episodes - 1):
         logger.record(episode=e, epsilon=mario.exploration_rate, step=mario.curr_step)
+
+# Always write a final checkpoint at the end of training
+mario.save()

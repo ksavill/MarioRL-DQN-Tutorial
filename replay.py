@@ -1,7 +1,9 @@
+import os
 import datetime
 from pathlib import Path
 
 import gym
+import warnings
 import gym_super_mario_bros
 from gym.wrappers import FrameStack
 from nes_py.wrappers import JoypadSpace
@@ -10,13 +12,16 @@ from metrics import MetricLogger
 from agent import Mario
 from wrappers import SkipFrame, GrayScaleObservation, ResizeObservation
 
+# Silence benign DeprecationWarnings emitted by Gym with NumPy>=1.24
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="gym.*")
+
 # 1. Initialize the environment with proper API compatibility for Gym 0.26+
 if gym.__version__ < "0.26":
     env = gym_super_mario_bros.make('SuperMarioBros-1-1-v3', new_step_api=True)
 else:
     env = gym_super_mario_bros.make(
-        'SuperMarioBros-1-1-v0',
-        render_mode='rgb',
+        'SuperMarioBros-1-1-v3',
+        render_mode='human',
         apply_api_compatibility=True,
     )
 
@@ -42,8 +47,16 @@ state, info = env.reset()
 save_dir = Path('checkpoints') / datetime.datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
 save_dir.mkdir(parents=True, exist_ok=True)
 
-# 5. Load an existing checkpoint if available
-checkpoint = Path('checkpoints/2020-10-21T18-25-27/mario.chkpt')
+# 5. Load latest checkpoint in checkpoints tree automatically (override by setting CKPT env var)
+env_ckpt = os.environ.get('CKPT', None)
+if env_ckpt:
+    checkpoint = Path(env_ckpt)
+else:
+    chkpts = sorted(Path('checkpoints').rglob('*.chkpt'), key=lambda p: p.stat().st_mtime, reverse=True)
+    checkpoint = chkpts[0] if chkpts else None
+
+if checkpoint is None or not checkpoint.exists():
+    raise FileNotFoundError("No checkpoint found. Train a model first, or set CKPT env var to a .chkpt path.")
 mario = Mario(
     state_dim=(4, 84, 84),
     action_dim=env.action_space.n,
